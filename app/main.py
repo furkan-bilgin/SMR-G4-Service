@@ -12,6 +12,7 @@ from datetime import datetime
 import zmq
 from apscheduler.triggers.cron import CronTrigger
 from fastapi import Depends, FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
@@ -37,6 +38,13 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 logging.getLogger("apscheduler.scheduler").setLevel(logging.ERROR)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 @app.post("/schedule")
@@ -148,6 +156,8 @@ def process_scheduled_jobs():
     if process.returncode != 0:
         logging.error(f"Job {job.id} failed with return code {process.returncode}")
         return
+    job.job_output = "\n".join(job_output).encode("utf-8")
+    db.commit()
     # Copy all output files
     for file in os.listdir(f"{SMR_G4_REAL_PATH}/output"):
         src = os.path.join(SMR_G4_REAL_PATH, "output", file)
@@ -158,5 +168,4 @@ def process_scheduled_jobs():
 
     logging.info(f"Job {job.id} completed successfully.")
     job.completed_at = datetime.utcnow()
-    job.job_output = "\n".join(job_output).encode("utf-8")
     db.commit()
