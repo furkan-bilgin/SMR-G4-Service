@@ -1,7 +1,7 @@
 from datetime import datetime
 
 from sqlalchemy.dialects.postgresql import BYTEA, JSONB
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, deferred, mapped_column
 
 from .database import Base
 
@@ -16,4 +16,7 @@ class SMRG4Job(Base):
     completed_at: Mapped[datetime | None] = mapped_column(nullable=True, default=None)
 
     config: Mapped[dict] = mapped_column(JSONB, nullable=False)
-    job_output: Mapped[str | None] = mapped_column(BYTEA, nullable=True)
+    job_output: Mapped[str | None] = mapped_column(
+        BYTEA, nullable=True, info={"deferred": True}
+    )
+    # job_output = deferred(job_output)
