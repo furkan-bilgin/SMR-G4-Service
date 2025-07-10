@@ -92,7 +92,6 @@ async def stream_job_output(job_id: int):
                 if line:
                     yield line + "\n"
         finally:
-            print("Closing subscriber socket and context.")
             sub.close()
             ctx.term()
 
