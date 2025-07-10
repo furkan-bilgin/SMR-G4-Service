@@ -169,3 +169,4 @@ def process_scheduled_jobs():
     logging.info(f"Job {job.id} completed successfully.")
     job.completed_at = datetime.utcnow()
     db.commit()
+    db.close()
