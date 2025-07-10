@@ -11,7 +11,7 @@ from datetime import datetime
 
 import zmq
 from apscheduler.triggers.cron import CronTrigger
-from fastapi import Depends, FastAPI
+from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
@@ -67,7 +67,7 @@ async def list_jobs(db: Session = Depends(get_db)):
 async def get_job(job_id: int, db: Session = Depends(get_db)):
     job = db.query(SMRG4Job).filter(SMRG4Job.id == job_id).first()
     if not job:
-        return {"error": "Job not found"}, 404
+        raise HTTPException(status_code=404, detail="Job not found")
 
     return {"job": job}
 
@@ -92,6 +92,7 @@ async def stream_job_output(job_id: int):
                 if line:
                     yield line + "\n"
         finally:
+            print("Closing subscriber socket and context.")
             sub.close()
             ctx.term()
 
