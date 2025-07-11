@@ -19,4 +19,5 @@ class SMRG4Job(Base):
     job_output: Mapped[str | None] = mapped_column(
         BYTEA, nullable=True, info={"deferred": True}
     )
+    is_processing: Mapped[bool] = mapped_column(nullable=False, default=False)
     # job_output = deferred(job_output)
