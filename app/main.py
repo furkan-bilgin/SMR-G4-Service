@@ -5,6 +5,8 @@ import os
 import shutil
 import subprocess
 import tempfile
+import time
+import traceback
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime
@@ -13,7 +15,7 @@ import zmq
 from apscheduler.triggers.cron import CronTrigger
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from sqlalchemy.orm import Session
 
 from .database import SessionLocal, get_db
@@ -59,7 +61,7 @@ async def schedule_job(job_config: ScheduleJobRequest, db: Session = Depends(get
 
 @app.get("/jobs")
 async def list_jobs(db: Session = Depends(get_db)):
-    jobs = db.query(SMRG4Job).all()
+    jobs = db.query(SMRG4Job).order_by(SMRG4Job.created_at.desc()).all()
     return {"jobs": jobs}
 
 
@@ -98,6 +100,18 @@ async def stream_job_output(job_id: int):
     return StreamingResponse(message_generator(), media_type="text/plain")
 
 
+# route to get files at ./output/
+@app.get("/output/{job_id}/{filename:path}")
+async def get_output_file(job_id: int, filename: str):
+    job = get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    file_path = os.path.join(OUTPUT_PATH, str(job_id), filename)
+    if not os.path.exists(file_path):
+        raise HTTPException(status_code=404, detail="File not found")
+    return FileResponse(os.path.join(OUTPUT_PATH, str(job_id), filename))
+
+
 @dataclass(kw_only=True)
 class G4Stdout:
     job_id: int
@@ -114,6 +128,10 @@ def process_scheduled_jobs():
             return
         job.is_processing = True
         db.commit()
+        JOB_SOURCE_PATH = os.path.join(SMR_G4_REAL_PATH, "output")
+        JOB_DEST_PATH = os.path.join(OUTPUT_PATH, str(job.id))
+        if not os.path.exists(JOB_DEST_PATH):
+            os.makedirs(JOB_DEST_PATH, exist_ok=True)
 
         # Create temp file for job config
         temp_config_path = tempfile.mktemp(suffix=".json")
@@ -128,56 +146,89 @@ def process_scheduled_jobs():
         pub = ctx.socket(zmq.PUB)
         pub.bind(IPC_SMR_G4_PUBSUB)
 
-        # Run SMR-G4 in the Docker container
-        process = subprocess.Popen(
-            [
-                "docker",
-                "exec",
-                DOCKER_GEANT4_CONTAINER_ID,
-                "/opt/bashrc.sh",
-                "/bin/bash",
-                "-c",
-                f"cd {SMR_G4_DOCKER_PATH} && ./SMR-G4 ./macros/run.mac",
-            ],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            bufsize=1,
-        )
-
         job_output = []
+
+        def pub_send(message: G4Stdout):
+            pub.send_string(str(message.job_id), zmq.SNDMORE)
+            pub.send_pyobj(message)
+            job_output.append(message.stdout_line or message.stderr_line or "")
+
+        def run(command: str) -> subprocess.Popen:
+            return subprocess.Popen(
+                [
+                    "docker",
+                    "exec",
+                    DOCKER_GEANT4_CONTAINER_ID,
+                    "/opt/bashrc.sh",
+                    "/bin/bash",
+                    "-c",
+                    f"cd {SMR_G4_DOCKER_PATH} && {command}",
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                bufsize=1,
+            )
+
+        time.sleep(1)  # Allow time for the publisher to bind
+        # Render the geometry
+        pub_send(G4Stdout(job_id=job.id, stdout_line="Rendering geometry..."))
+        process = run(
+            "export G4DAWNFILE_DEST_DIR='./output/' && ./SMR-G4 ./macros/render.mac"
+        )
+        process.wait()
+        if process.returncode != 0:
+            raise RuntimeError(
+                f"Initial geometry rendering failed with return code {process.returncode}"
+            )
+        # Copy the latest .prim file to the output directory
+        latest_prim_file = max(
+            [
+                os.path.join(JOB_SOURCE_PATH, f)
+                for f in os.listdir(JOB_SOURCE_PATH)
+                if f.endswith(".prim")
+            ],
+            key=os.path.getctime,
+        )
+        shutil.move(latest_prim_file, f"{JOB_DEST_PATH}/geometry.prim")
+        pub_send(G4Stdout(job_id=job.id, stdout_line="Geometry rendered successfully."))
+
+        # Run SMR-G4 in the Docker container
+        process = run("./SMR-G4 ./macros/run.mac")
+
         for line in process.stdout:
             line = line.strip()
-            pub.send(str(job.id).encode(), zmq.SNDMORE)
-            pub.send_pyobj(G4Stdout(job_id=job.id, stdout_line=line))
-            job_output.append(line)
+            pub_send(G4Stdout(job_id=job.id, stdout_line=line))
 
         for line in process.stderr:
             line = line.strip()
-            pub.send(str(job.id).encode(), zmq.SNDMORE)
-            pub.send_pyobj(G4Stdout(job_id=job.id, stderr_line=line))
-            job_output.append(line)
+            pub_send(G4Stdout(job_id=job.id, stderr_line=line))
 
         process.wait()
-        pub.close()
         if process.returncode != 0:
-            logging.error(f"Job {job.id} failed with return code {process.returncode}")
-            job.is_processing = False
-            db.commit()
-            return
-        job.job_output = "\n".join(job_output).encode("utf-8")
-        db.commit()
+            raise RuntimeError(
+                f"Job {job.id} failed with return code {process.returncode}"
+            )
 
-        # Copy all output files
-        for file in os.listdir(f"{SMR_G4_REAL_PATH}/output"):
-            src = os.path.join(SMR_G4_REAL_PATH, "output", file)
-            dst = os.path.join(OUTPUT_PATH, str(job.id), file)
-            if not os.path.exists(os.path.dirname(dst)):
-                os.makedirs(os.path.dirname(dst), exist_ok=True)
+        # Copy CSV files
+        for file in os.listdir(JOB_SOURCE_PATH):
+            if not file.endswith(".csv"):
+                continue
+            src = os.path.join(JOB_SOURCE_PATH, file)
+            dst = os.path.join(JOB_DEST_PATH, file)
             shutil.copy(src, dst)
 
-        logging.info(f"Job {job.id} completed successfully.")
         job.completed_at = datetime.utcnow()
+        job.is_processing = False
+        pub_send(G4Stdout(job_id=job.id, stdout_line="Job completed successfully."))
+        job.job_output = "\n".join(job_output).encode("utf-8")
+        db.commit()
+        pub.close()
+        logging.info(f"Job {job.id} completed successfully.")
+    except Exception as e:
+        logging.error(
+            f"Job {job.id} failed with exception {e} {traceback.format_exc()}"
+        )
         job.is_processing = False
         db.commit()
     finally:
