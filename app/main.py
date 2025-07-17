@@ -82,6 +82,13 @@ async def delete_job(job_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Job not found")
     db.delete(job)
     db.commit()
+    # delete files at OUTPUT_PATH
+    job_output_path = os.path.join(OUTPUT_PATH, str(job_id))
+    if os.path.exists(job_output_path):
+        shutil.rmtree(job_output_path)
+    tar_path = f"{job_output_path}.tar.gz"
+    if os.path.exists(tar_path):
+        os.remove(tar_path)
     return {"success": True}
 
 
@@ -117,7 +124,30 @@ async def stream_job_output(job_id: int):
     return StreamingResponse(message_generator(), media_type="text/plain")
 
 
-# route to get files at ./output/
+@app.get("/jobs/{job_id}/download/tar")
+async def download_job_output(job_id: int):
+    """
+    Download the output of a job as a tar.gz file.
+    """
+    job = get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    job_output_path = os.path.join(OUTPUT_PATH, str(job_id))
+    if not os.path.exists(job_output_path):
+        raise HTTPException(status_code=404, detail="Job output not found")
+
+    tar_path = f"{job_output_path}.tar.gz"
+    if not os.path.exists(tar_path) or os.path.getmtime(tar_path) < os.path.getmtime(
+        job_output_path
+    ):
+        shutil.make_archive(job_output_path, "gztar", job_output_path)
+
+    return FileResponse(
+        tar_path, media_type="application/gzip", filename=f"job_{job_id}_output.tar.gz"
+    )
+
+
 @app.get("/output/{job_id}/{filename:path}")
 async def get_output_file(job_id: int, filename: str):
     job = get_job(job_id)
