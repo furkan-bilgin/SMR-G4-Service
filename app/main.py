@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -156,6 +157,17 @@ def process_scheduled_jobs():
 
         # Move temp file into SMR-G4's config path
         shutil.move(temp_config_path, f"{SMR_G4_REAL_PATH}/config/config.json")
+
+        # Change run.mac to set /run/beamOn {config.event_count}
+        with open(f"{SMR_G4_REAL_PATH}/macros/run.mac", "r") as f:
+            run_mac_content = f.read()
+        run_mac_content = re.sub(
+            r"(/run/beamOn\s+)\d+",
+            lambda m: f"{m.group(1)}{job.config['event_count']}",
+            run_mac_content,
+        )
+        with open(f"{SMR_G4_REAL_PATH}/macros/run.mac", "w") as f:
+            f.write(run_mac_content)
 
         # Init ZMQ publisher
         ctx = zmq.Context()
