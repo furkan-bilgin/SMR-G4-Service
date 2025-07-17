@@ -84,6 +84,12 @@ async def delete_job(job_id: int, db: Session = Depends(get_db)):
     return {"success": True}
 
 
+@app.post("/jobs/{job_id}/delete")
+async def delete_job_post(job_id: int, db: Session = Depends(get_db)):
+    """Delete job subsitute with POST, because Erciyes network prohibits DELETE method."""
+    return await delete_job(job_id, db)
+
+
 @app.get("/jobs/{job_id}/stream")
 async def stream_job_output(job_id: int):
     """
@@ -214,7 +220,15 @@ def process_scheduled_jobs():
             line = line.strip()
             pub_send(G4Stdout(job_id=job.id, stderr_line=line))
 
-        process.wait()
+        while True:
+            try:
+                process.wait(timeout=5)
+                break
+            except subprocess.TimeoutExpired:
+                if not db.query(SMRG4Job).get(job.id):
+                    logging.info(f"Job {job.id} has been deleted, stopping processing.")
+                    return
+
         if process.returncode != 0:
             raise RuntimeError(
                 f"Job {job.id} failed with return code {process.returncode}"
