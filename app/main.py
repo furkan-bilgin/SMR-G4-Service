@@ -126,11 +126,11 @@ async def stream_job_output(job_id: int):
 
 
 @app.get("/jobs/{job_id}/download/tar")
-async def download_job_output(job_id: int):
+async def download_job_output(job_id: int, db: Session = Depends(get_db)):
     """
     Download the output of a job as a tar.gz file.
     """
-    job = get_job(job_id)
+    job = db.query(SMRG4Job).filter(SMRG4Job.id == job_id).first()
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
 
@@ -150,8 +150,8 @@ async def download_job_output(job_id: int):
 
 
 @app.get("/output/{job_id}/{filename:path}")
-async def get_output_file(job_id: int, filename: str):
-    job = get_job(job_id)
+async def get_output_file(job_id: int, filename: str, db: Session = Depends(get_db)):
+    job = db.query(SMRG4Job).filter(SMRG4Job.id == job_id).first()
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
     file_path = os.path.join(OUTPUT_PATH, str(job_id), filename)
