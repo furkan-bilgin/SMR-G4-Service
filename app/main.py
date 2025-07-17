@@ -222,7 +222,7 @@ def process_scheduled_jobs():
 
         while True:
             try:
-                process.wait(timeout=5)
+                process.wait(timeout=2)
                 break
             except subprocess.TimeoutExpired:
                 if not db.query(SMRG4Job).get(job.id):
