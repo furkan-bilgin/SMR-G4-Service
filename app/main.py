@@ -227,6 +227,7 @@ def process_scheduled_jobs():
             except subprocess.TimeoutExpired:
                 if not db.query(SMRG4Job).get(job.id):
                     logging.info(f"Job {job.id} has been deleted, stopping processing.")
+                    process.kill()
                     return
 
         if process.returncode != 0:
