@@ -32,6 +32,11 @@ from .settings import (
     SMR_G4_REAL_PATH,
 )
 
+logging.basicConfig(
+    level=logging.DEBUG,
+    format="%(asctime)s %(levelname)s %(name)s %(message)s",
+)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -41,14 +46,10 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(lifespan=lifespan)
-logging.basicConfig(
-    filename="log.log",
-    level=logging.DEBUG,
-    format="%(asctime)s %(levelname)s %(name)s %(message)s",
-)
 
+logging.getLogger("apscheduler.executors").setLevel(logging.ERROR)
+logging.getLogger("apscheduler.scheduler").setLevel(logging.ERROR)
 
-# logging.getLogger("apscheduler.scheduler").setLevel(logging.ERROR)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -60,26 +61,31 @@ app.add_middleware(
 
 @app.post("/schedule")
 async def schedule_job(job_config: ScheduleJobRequest, db: Session = Depends(get_db)):
+    logging.info("Scheduling a new job with config: %s", job_config)
     job = SMRG4Job(
         config=job_config.job_config,
     )
     db.add(job)
     db.commit()
+    logging.info(f"Job scheduled with ID: {job.id}")
     return {"success": True, "job_id": job.id}
 
 
 @app.get("/jobs")
 async def list_jobs(db: Session = Depends(get_db)):
+    logging.info("Listing all jobs")
     jobs = db.query(SMRG4Job).order_by(SMRG4Job.created_at.desc()).all()
+    logging.info(f"Found {len(jobs)} jobs")
     return {"jobs": jobs}
 
 
 @app.get("/jobs/{job_id}")
 async def get_job(job_id: int, db: Session = Depends(get_db)):
+    logging.info(f"Fetching job {job_id}")
     job = db.query(SMRG4Job).filter(SMRG4Job.id == job_id).first()
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
-
+    logging.info(f"Returning job {job_id}")
     return {"job": job}
 
 
@@ -111,6 +117,7 @@ async def stream_job_output(job_id: int):
     """
     Stream the output of a job in real-time.
     """
+    logging.info(f"Starting streaming for job {job_id}")
     ctx = zmq.Context()
     sub = ctx.socket(zmq.SUB)
     sub.connect(IPC_SMR_G4_PUBSUB)
@@ -126,6 +133,7 @@ async def stream_job_output(job_id: int):
                 if line:
                     yield line + "\n"
         finally:
+            logging.info(f"Stopping streaming for job {job_id}")
             sub.close()
             ctx.term()
 
@@ -137,6 +145,7 @@ async def download_job_output(job_id: int, db: Session = Depends(get_db)):
     """
     Download the output of a job as a tar.gz file.
     """
+    logging.info(f"Downloading output for job {job_id}")
     job = db.query(SMRG4Job).filter(SMRG4Job.id == job_id).first()
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
@@ -150,7 +159,7 @@ async def download_job_output(job_id: int, db: Session = Depends(get_db)):
         job_output_path
     ):
         shutil.make_archive(job_output_path, "gztar", job_output_path)
-
+    logging.info(f"Tar file created at {tar_path}")
     return FileResponse(
         tar_path, media_type="application/gzip", filename=f"job_{job_id}_output.tar.gz"
     )
@@ -158,12 +167,14 @@ async def download_job_output(job_id: int, db: Session = Depends(get_db)):
 
 @app.get("/output/{job_id}/{filename:path}")
 async def get_output_file(job_id: int, filename: str, db: Session = Depends(get_db)):
+    logging.info(f"Fetching output file {filename} for job {job_id}")
     job = db.query(SMRG4Job).filter(SMRG4Job.id == job_id).first()
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
     file_path = os.path.join(OUTPUT_PATH, str(job_id), filename)
     if not os.path.exists(file_path):
         raise HTTPException(status_code=404, detail="File not found")
+    logging.info(f"Returning file {file_path}")
     return FileResponse(os.path.join(OUTPUT_PATH, str(job_id), filename))
 
 
