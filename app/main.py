@@ -189,7 +189,7 @@ def process_scheduled_jobs():
         process.wait(timeout=30)
         if process.returncode != 0:
             raise RuntimeError(
-                f"Initial geometry rendering failed with return code {process.returncode}\{process.stdout.read()} {process.stderr.read()}"
+                f"Initial geometry rendering failed with return code {process.returncode}\n{process.stdout.read()} {process.stderr.read()}"
             )
         # Copy the latest .prim file to the output directory
         latest_prim_file = max(
