@@ -41,7 +41,14 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(lifespan=lifespan)
-logging.getLogger("apscheduler.scheduler").setLevel(logging.ERROR)
+logging.basicConfig(
+    filename="log.log",
+    level=logging.DEBUG,
+    format="%(asctime)s %(levelname)s %(name)s %(message)s",
+)
+
+
+# logging.getLogger("apscheduler.scheduler").setLevel(logging.ERROR)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
