@@ -651,6 +651,7 @@ dependencies = [
     { name = "apscheduler" },
     { name = "fastapi", extra = ["standard"] },
     { name = "psycopg2" },
+    { name = "pydantic" },
     { name = "pyzmq" },
     { name = "sqlalchemy" },
 ]
@@ -661,6 +662,7 @@ requires-dist = [
     { name = "apscheduler", specifier = ">=3.11.0" },
     { name = "fastapi", extras = ["standard"], specifier = ">=0.116.0" },
     { name = "psycopg2", specifier = ">=2.9.10" },
+    { name = "pydantic", specifier = ">=2.11.7" },
     { name = "pyzmq", specifier = ">=27.0.0" },
     { name = "sqlalchemy", specifier = ">=2.0.41" },
 ]

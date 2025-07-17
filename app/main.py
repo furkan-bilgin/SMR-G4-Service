@@ -74,6 +74,16 @@ async def get_job(job_id: int, db: Session = Depends(get_db)):
     return {"job": job}
 
 
+@app.delete("/jobs/{job_id}")
+async def delete_job(job_id: int, db: Session = Depends(get_db)):
+    job = db.query(SMRG4Job).filter(SMRG4Job.id == job_id).first()
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    db.delete(job)
+    db.commit()
+    return {"success": True}
+
+
 @app.get("/jobs/{job_id}/stream")
 async def stream_job_output(job_id: int):
     """
@@ -176,10 +186,10 @@ def process_scheduled_jobs():
         process = run(
             "export G4DAWNFILE_DEST_DIR='./output/' && ./SMR-G4 ./macros/render.mac"
         )
-        process.wait()
+        process.wait(timeout=30)
         if process.returncode != 0:
             raise RuntimeError(
-                f"Initial geometry rendering failed with return code {process.returncode}"
+                f"Initial geometry rendering failed with return code {process.returncode}\{process.stdout.read()} {process.stderr.read()}"
             )
         # Copy the latest .prim file to the output directory
         latest_prim_file = max(

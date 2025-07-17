@@ -9,6 +9,7 @@ dependencies = [
     "apscheduler>=3.11.0",
     "fastapi[standard]>=0.116.0",
     "psycopg2>=2.9.10",
+    "pydantic>=2.11.7",
     "pyzmq>=27.0.0",
     "sqlalchemy>=2.0.41",
 ]
