@@ -18,6 +18,7 @@ from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from sqlalchemy.orm import Session
+from sqlalchemy.orm.exc import StaleDataError
 
 from .database import SessionLocal, get_db
 from .models import SMRG4Job
@@ -296,7 +297,10 @@ def process_scheduled_jobs():
         logging.error(
             f"Job {job.id} failed with exception {e} {traceback.format_exc()}"
         )
-        job.is_processing = False
-        db.commit()
+        try:
+            job.is_processing = False
+            db.commit()
+        except StaleDataError:
+            pass
     finally:
         db.close()
