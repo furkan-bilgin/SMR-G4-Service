@@ -3,7 +3,10 @@ from sqlalchemy.orm import declarative_base, sessionmaker
 
 from .settings import DATABASE_URL
 
-engine = create_async_engine(DATABASE_URL)
+engine = create_async_engine(
+    DATABASE_URL,
+    connect_args={"command_timeout": 15},
+)
 AsyncSessionLocal = sessionmaker(
     bind=engine,
     class_=AsyncSession,

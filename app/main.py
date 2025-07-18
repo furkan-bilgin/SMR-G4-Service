@@ -1,17 +1,18 @@
 import asyncio
+import asyncio.subprocess as aiosubprocess
 import json
 import logging
 import os
 import re
 import shutil
-import subprocess
 import tempfile
-from asyncio import to_thread
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime
 
+import aiofiles
 import zmq
+import zmq.asyncio as azmq
 from apscheduler.triggers.cron import CronTrigger
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -124,20 +125,21 @@ async def stream_job_output(job_id: int):
     Stream the output of a job in real-time.
     """
     logging.info(f"Starting streaming for job {job_id}")
-    ctx = zmq.Context()
+    ctx = azmq.Context()
     sub = ctx.socket(zmq.SUB)
     sub.connect(IPC_SMR_G4_PUBSUB)
     sub.setsockopt_string(zmq.SUBSCRIBE, str(job_id))
 
     async def message_generator():
-        loop = asyncio.get_event_loop()
         try:
             while True:
-                await loop.run_in_executor(None, sub.recv)
-                message: G4Stdout = await loop.run_in_executor(None, sub.recv_pyobj)
+                await sub.recv()  # topic
+                message: G4Stdout = await sub.recv_pyobj()
                 line = message.stdout_line or message.stderr_line
                 if line:
-                    yield line + "\n"
+                    if isinstance(line, bytes):
+                        line = line.decode("utf-8")
+                    yield (line + "\n").encode("utf-8")
         finally:
             logging.info(f"Stopping streaming for job {job_id}")
             sub.close()
@@ -195,112 +197,122 @@ class G4Stdout:
     stderr_line: str | None = None
 
 
-async def _do_process_scheduled_job(job: SMRG4Job, session: Session):
+async def _do_process_scheduled_job(job: SMRG4Job, session: AsyncSession):
     job.is_processing = True
     await session.commit()
+
     JOB_SOURCE_PATH = os.path.join(SMR_G4_REAL_PATH, "output")
     JOB_DEST_PATH = os.path.join(OUTPUT_PATH, str(job.id))
+
     if not os.path.exists(JOB_DEST_PATH):
-        await to_thread(os.makedirs, JOB_DEST_PATH, True)
+        await asyncio.to_thread(os.makedirs, JOB_DEST_PATH, True)
 
     # Create temp file for job config
     temp_config_path = tempfile.mktemp(suffix=".json")
-    await to_thread(lambda: json.dump(job.config, open(temp_config_path, "w")))
+    async with aiofiles.open(temp_config_path, "w") as f:
+        await f.write(json.dumps(job.config))
 
     # Move temp file into SMR-G4's config path
-    await to_thread(
+    await asyncio.to_thread(
         shutil.move, temp_config_path, f"{SMR_G4_REAL_PATH}/config/config.json"
     )
 
     # Change run.mac to set /run/beamOn {config.event_count}
     run_mac_path = f"{SMR_G4_REAL_PATH}/macros/run.mac"
-    run_mac_content = await to_thread(lambda: open(run_mac_path, "r").read())
+    async with aiofiles.open(run_mac_path, "r") as f:
+        run_mac_content = await f.read()
+
     run_mac_content = re.sub(
         r"(/run/beamOn\s+)\d+",
         lambda m: f"{m.group(1)}{job.config['event_count']}",
         run_mac_content,
     )
-    await to_thread(lambda: open(run_mac_path, "w").write(run_mac_content))
+    async with aiofiles.open(run_mac_path, "w") as f:
+        await f.write(run_mac_content)
 
-    # Init ZMQ publisher
-    ctx = zmq.Context()
+    ctx = azmq.Context()
     pub = ctx.socket(zmq.PUB)
     pub.bind(IPC_SMR_G4_PUBSUB)
 
     job_output = []
 
-    def pub_send(message: G4Stdout):
-        pub.send_string(str(message.job_id), zmq.SNDMORE)
-        pub.send_pyobj(message)
+    async def pub_send(message: G4Stdout):
+        await pub.send_string(str(message.job_id), zmq.SNDMORE)
+        await pub.send_pyobj(message)
         job_output.append(message.stdout_line or message.stderr_line or "")
 
-    async def run(command: str) -> subprocess.Popen:
-        return await to_thread(
-            lambda: subprocess.Popen(
-                [
-                    "docker",
-                    "exec",
-                    DOCKER_GEANT4_CONTAINER_ID,
-                    "/opt/bashrc.sh",
-                    "/bin/bash",
-                    "-c",
-                    f"cd {SMR_G4_DOCKER_PATH} && {command}",
-                ],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                bufsize=1,
-            )
+    async def run_docker_command(command: str) -> aiosubprocess.Process:
+        return await aiosubprocess.create_subprocess_exec(
+            "docker",
+            "exec",
+            DOCKER_GEANT4_CONTAINER_ID,
+            "/opt/bashrc.sh",
+            "/bin/bash",
+            "-c",
+            f"cd {SMR_G4_DOCKER_PATH} && {command}",
+            stdout=aiosubprocess.PIPE,
+            stderr=aiosubprocess.PIPE,
         )
 
-    await asyncio.sleep(1)  # Allow time for the publisher to bind
-    # Render the geometry
-    pub_send(
+    await asyncio.sleep(1)
+
+    await pub_send(
         G4Stdout(
             job_id=job.id,
             stdout_line="Received config:\n" + json.dumps(job.config, indent=2),
         )
     )
-    pub_send(G4Stdout(job_id=job.id, stdout_line="Rendering geometry..."))
-    process = await run(
+    await pub_send(G4Stdout(job_id=job.id, stdout_line="Rendering geometry..."))
+
+    process = await run_docker_command(
         "export G4DAWNFILE_DEST_DIR='./output/' && ./SMR-G4 ./macros/render.mac"
     )
+
     try:
-        await to_thread(process.wait, 30)
-    except subprocess.TimeoutExpired:
+        await asyncio.wait_for(process.wait(), timeout=30)
+    except asyncio.TimeoutError:
         process.kill()
         raise RuntimeError("Geometry rendering timed out.")
 
     if process.returncode != 0:
+        stdout_data = await process.stdout.read()
+        stderr_data = await process.stderr.read()
         raise RuntimeError(
-            f"Initial geometry rendering failed with return code {process.returncode}\n{process.stdout.read()} {process.stderr.read()}"
+            f"Initial geometry rendering failed with return code {process.returncode}\n{stdout_data} {stderr_data}"
         )
-    # Copy the latest .prim file to the output directory
+
     prim_files = [
         os.path.join(JOB_SOURCE_PATH, f)
-        for f in await to_thread(os.listdir, JOB_SOURCE_PATH)
+        for f in await asyncio.to_thread(os.listdir, JOB_SOURCE_PATH)
         if f.endswith(".prim")
     ]
+
     latest_prim_file = max(prim_files, key=os.path.getctime)
-    # Ensure the destination directory exists and has write permissions
-    await to_thread(os.makedirs, JOB_DEST_PATH, exist_ok=True)
-    await to_thread(lambda: os.chmod(JOB_DEST_PATH, 0o777))
-    await to_thread(shutil.move, latest_prim_file, f"{JOB_DEST_PATH}/geometry.prim")
-    pub_send(G4Stdout(job_id=job.id, stdout_line="Geometry rendered successfully."))
+
+    await asyncio.to_thread(os.makedirs, JOB_DEST_PATH, exist_ok=True)
+    await asyncio.to_thread(os.chmod, JOB_DEST_PATH, 0o777)
+    await asyncio.to_thread(
+        shutil.move, latest_prim_file, f"{JOB_DEST_PATH}/geometry.prim"
+    )
+    await pub_send(
+        G4Stdout(job_id=job.id, stdout_line="Geometry rendered successfully.")
+    )
 
     # Run SMR-G4 in the Docker container
-    process = await run("./SMR-G4 ./macros/run.mac")
+    process = await run_docker_command("./SMR-G4 ./macros/run.mac")
 
     async def read_stream(stream, is_stdout=True):
         while True:
-            line = await to_thread(stream.readline)
+            line = await stream.readline()
             if not line:
                 break
             line = line.strip()
+            if isinstance(line, bytes):
+                line = line.decode("utf-8")
             if is_stdout:
-                pub_send(G4Stdout(job_id=job.id, stdout_line=line))
+                await pub_send(G4Stdout(job_id=job.id, stdout_line=line))
             else:
-                pub_send(G4Stdout(job_id=job.id, stderr_line=line))
+                await pub_send(G4Stdout(job_id=job.id, stderr_line=line))
 
     await asyncio.gather(
         read_stream(process.stdout, True),
@@ -309,13 +321,13 @@ async def _do_process_scheduled_job(job: SMRG4Job, session: Session):
 
     while True:
         try:
-            await to_thread(process.wait, 2)
+            await asyncio.wait_for(process.wait(), timeout=2)
             break
-        except subprocess.TimeoutExpired:
-            job_exists = await session.execute(
+        except asyncio.TimeoutError:
+            job_exists_result = await session.execute(
                 select(SMRG4Job).filter(SMRG4Job.id == job.id)
             )
-            job_exists = job_exists.scalars().first()
+            job_exists = job_exists_result.scalars().first()
             if not job_exists:
                 logging.info(f"Job {job.id} has been deleted, stopping processing.")
                 process.kill()
@@ -324,18 +336,17 @@ async def _do_process_scheduled_job(job: SMRG4Job, session: Session):
     if process.returncode != 0:
         raise RuntimeError(f"Job {job.id} failed with return code {process.returncode}")
 
-    # Copy CSV files
-    files = await to_thread(os.listdir, JOB_SOURCE_PATH)
+    files = await asyncio.to_thread(os.listdir, JOB_SOURCE_PATH)
     for file in files:
         if not file.endswith(".csv"):
             continue
         src = os.path.join(JOB_SOURCE_PATH, file)
         dst = os.path.join(JOB_DEST_PATH, file)
-        await to_thread(shutil.copy, src, dst)
+        await asyncio.to_thread(shutil.copy, src, dst)
 
     job.completed_at = datetime.utcnow()
     job.is_processing = False
-    pub_send(G4Stdout(job_id=job.id, stdout_line="Job completed successfully."))
+    await pub_send(G4Stdout(job_id=job.id, stdout_line="Job completed successfully."))
     job.job_output = "\n".join(job_output).encode("utf-8")
     await session.commit()
     pub.close()
