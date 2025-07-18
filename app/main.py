@@ -255,6 +255,12 @@ async def _do_process_scheduled_job(job: SMRG4Job, session: Session):
 
     await asyncio.sleep(1)  # Allow time for the publisher to bind
     # Render the geometry
+    pub_send(
+        G4Stdout(
+            job_id=job.id,
+            stdout_line="Received config:\n" + json.dumps(job.config, indent=2),
+        )
+    )
     pub_send(G4Stdout(job_id=job.id, stdout_line="Rendering geometry..."))
     process = await run(
         "export G4DAWNFILE_DEST_DIR='./output/' && ./SMR-G4 ./macros/render.mac"
@@ -306,7 +312,10 @@ async def _do_process_scheduled_job(job: SMRG4Job, session: Session):
             await to_thread(process.wait, 2)
             break
         except subprocess.TimeoutExpired:
-            job_exists = await to_thread(lambda: db.query(SMRG4Job).get(job.id))
+            job_exists = await session.execute(
+                select(SMRG4Job).filter(SMRG4Job.id == job.id)
+            )
+            job_exists = job_exists.scalars().first()
             if not job_exists:
                 logging.info(f"Job {job.id} has been deleted, stopping processing.")
                 process.kill()
